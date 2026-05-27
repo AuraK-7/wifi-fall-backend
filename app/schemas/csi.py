@@ -1,19 +1,29 @@
-from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 
+ActivityLabel = Literal["empty", "walking", "sitting", "lying", "fall", "unknown"]
+RiskLevel = Literal["low", "medium", "high"]
+
+
 class CsiFrame(BaseModel):
-    timestamp: datetime
-    device_id: str
-    amplitudes: list[float] = Field(..., min_length=1)
-    phase: list[float] = Field(..., min_length=1)
+    timestamp: float
+    room: str
+    subcarriers: list[float] = Field(..., min_length=1)
+    simulated_label: ActivityLabel = "unknown"
 
 
-class FallDetectionResult(BaseModel):
-    timestamp: datetime
-    device_id: str
-    score: float = Field(..., ge=0.0, le=1.0)
-    status: Literal["normal", "fall_suspected"]
-    message: str
+class DetectionResult(BaseModel):
+    timestamp: float
+    room: str
+    predicted_label: ActivityLabel
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    risk_level: RiskLevel
+    alert: bool
+    reason: str = ""
+
+
+class CsiStreamMessage(BaseModel):
+    frame: CsiFrame
+    result: DetectionResult

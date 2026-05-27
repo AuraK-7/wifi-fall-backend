@@ -1,20 +1,24 @@
 import numpy as np
 
 from app.core.config import settings
-from app.schemas.csi import CsiFrame, FallDetectionResult
+from app.schemas.csi import CsiFrame, DetectionResult
 
 
 class FallDetector:
-    def detect(self, frame: CsiFrame) -> FallDetectionResult:
-        amplitudes = np.array(frame.amplitudes, dtype=float)
-        volatility = float(np.std(amplitudes))
-        score = min(volatility / settings.FALL_CONFIDENCE_THRESHOLD, 1.0)
-        status = "fall_suspected" if score >= 0.8 else "normal"
+    def detect(self, frame: CsiFrame) -> DetectionResult:
+        subcarriers = np.array(frame.subcarriers, dtype=float)
+        energy = float(np.sum(np.square(subcarriers)))
+        confidence = min(energy / settings.HIGH_ENERGY_THRESHOLD, 1.0)
+        predicted_label = "fall" if confidence >= settings.FALL_CONFIDENCE_THRESHOLD else "unknown"
+        risk_level = "high" if predicted_label == "fall" else "low"
+        alert = predicted_label == "fall"
 
-        return FallDetectionResult(
+        return DetectionResult(
             timestamp=frame.timestamp,
-            device_id=frame.device_id,
-            score=round(score, 4),
-            status=status,
-            message="Fall suspected" if status == "fall_suspected" else "Normal activity",
+            room=frame.room,
+            predicted_label=predicted_label,
+            confidence=round(confidence, 4),
+            risk_level=risk_level,
+            alert=alert,
+            reason="High CSI energy detected" if alert else "No fall pattern detected",
         )

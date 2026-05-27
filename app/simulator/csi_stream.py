@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+import time
 
 import numpy as np
 
@@ -7,25 +7,20 @@ from app.schemas.csi import CsiFrame
 
 
 class CsiStreamSimulator:
-    def __init__(self, device_id: str = "sim-device-001") -> None:
-        self.device_id = device_id
+    def __init__(self, room: str = settings.DEFAULT_ROOM) -> None:
+        self.room = room
         self.subcarrier_count = settings.CSI_SUBCARRIER_COUNT
 
     def next_frame(self) -> CsiFrame:
-        amplitudes = np.random.normal(
+        subcarriers = np.random.normal(
             loc=1.0,
             scale=0.08,
             size=self.subcarrier_count,
         )
-        phase = np.random.uniform(
-            low=-np.pi,
-            high=np.pi,
-            size=self.subcarrier_count,
-        )
 
         return CsiFrame(
-            timestamp=datetime.now(timezone.utc),
-            device_id=self.device_id,
-            amplitudes=amplitudes.round(4).tolist(),
-            phase=phase.round(4).tolist(),
+            timestamp=time.time(),
+            room=self.room,
+            subcarriers=subcarriers.round(4).tolist(),
+            simulated_label="unknown",
         )

@@ -1,6 +1,6 @@
-from app.schemas.csi import FallDetectionResult
+from app.schemas.csi import DetectionResult
 
 
 class AlertService:
-    def should_alert(self, result: FallDetectionResult) -> bool:
-        return result.status == "fall_suspected"
+    def should_alert(self, result: DetectionResult) -> bool:
+        return result.alert

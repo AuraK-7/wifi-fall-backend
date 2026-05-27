@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.schemas.csi import CsiFrame, FallDetectionResult
+from app.schemas.csi import CsiFrame, DetectionResult
 from app.services.detector import FallDetector
 from app.simulator.csi_stream import CsiStreamSimulator
 
@@ -19,7 +19,7 @@ def get_csi_sample() -> CsiFrame:
     return simulator.next_frame()
 
 
-@router.get("/fall/sample", response_model=FallDetectionResult)
-def get_fall_detection_sample() -> FallDetectionResult:
+@router.get("/fall/sample", response_model=DetectionResult)
+def get_fall_detection_sample() -> DetectionResult:
     frame = simulator.next_frame()
     return detector.detect(frame)
