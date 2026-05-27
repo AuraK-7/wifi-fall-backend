@@ -21,10 +21,10 @@ copy .env.example .env
 uvicorn app.main:app --reload
 ```
 
-Default health check:
+Default status endpoint:
 
 ```text
-GET http://127.0.0.1:8000/api/health
+GET http://127.0.0.1:8000/
 ```
 
 ## Test
