@@ -4,3 +4,5 @@ pydantic-settings
 numpy
 pytest
 httpx
+sqlalchemy
+python-dotenv

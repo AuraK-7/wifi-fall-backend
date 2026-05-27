@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "dev"
     HOST: str = "127.0.0.1"
     PORT: int = 8000
+    DATABASE_URL: str = "sqlite:///./wifi_fall_guard.db"
 
     CSI_FRAME_INTERVAL_MS: int = 100
     CSI_SUBCARRIER_COUNT: int = 64
