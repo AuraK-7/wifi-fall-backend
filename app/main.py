@@ -6,7 +6,7 @@ from app.core.config import settings
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title=settings.PROJECT_NAME,
+        title=settings.APP_NAME,
         version=settings.API_VERSION,
         description="Backend service for Wi-Fi CSI fall detection simulation.",
     )

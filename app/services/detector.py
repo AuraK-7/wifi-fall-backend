@@ -8,7 +8,7 @@ class FallDetector:
     def detect(self, frame: CsiFrame) -> FallDetectionResult:
         amplitudes = np.array(frame.amplitudes, dtype=float)
         volatility = float(np.std(amplitudes))
-        score = min(volatility / settings.FALL_THRESHOLD, 1.0)
+        score = min(volatility / settings.FALL_CONFIDENCE_THRESHOLD, 1.0)
         status = "fall_suspected" if score >= 0.8 else "normal"
 
         return FallDetectionResult(
