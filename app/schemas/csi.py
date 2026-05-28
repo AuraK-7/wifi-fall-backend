@@ -45,6 +45,13 @@ class SimulatorCommand(BaseModel):
     room: str | None = None
 
 
+class CsvDataSourceCommand(BaseModel):
+    csv_path: str
+    room: str = "real_room"
+    device_id: str = "csv-node-001"
+    label: ActivityLabel = "unknown"
+
+
 class RecentResultItem(BaseModel):
     frame: CsiFrame
     result: DetectionResult

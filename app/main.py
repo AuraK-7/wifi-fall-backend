@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import time
-from typing import Any, cast
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,11 +14,11 @@ from app.core.logging_config import setup_logging
 from app.db import models
 from app.db.database import Base, SessionLocal, engine, get_db
 from app.schemas.alert import AlertEventCreate, AlertEventRead, AlertEventUpdate
-from app.schemas.csi import ActivityLabel, CsiFrame, DetectionResult
+from app.schemas.csi import CsiFrame, CsvDataSourceCommand, DetectionResult
 from app.services.alert import AlertService
+from app.services.data_source_manager import DataSourceManager
 from app.services.detector import SimpleFallDetector
 from app.services.runtime_state import RuntimeState
-from app.simulator.csi_stream import CsiStreamSimulator
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -24,10 +26,9 @@ logger = logging.getLogger(__name__)
 Base.metadata.create_all(bind=engine)
 logger.info("Application database tables initialized")
 
-VALID_LABELS: set[str] = {"empty", "walking", "sitting", "lying", "fall", "unknown"}
 ALERT_COOLDOWN_SECONDS = 10
 
-simulator = CsiStreamSimulator()
+data_source_manager = DataSourceManager()
 detector = SimpleFallDetector()
 runtime_state = RuntimeState()
 alert_service = AlertService()
@@ -36,11 +37,18 @@ last_alert_time = 0.0
 _ = models
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    logger.info("Application startup complete")
+    yield
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.API_VERSION,
         description="Backend service for Wi-Fi CSI fall detection simulation.",
+        lifespan=lifespan,
     )
     logger.info("FastAPI app created")
 
@@ -51,10 +59,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    @app.on_event("startup")
-    def on_startup() -> None:
-        logger.info("Application startup complete")
 
     @app.get("/")
     def root() -> dict[str, str]:
@@ -69,71 +73,31 @@ def create_app() -> FastAPI:
         return {
             "app": settings.APP_NAME,
             "env": settings.APP_ENV,
-            "simulator": {
-                "current_label": simulator.current_label,
-                "room": simulator.room,
-                "device_id": simulator.device_id,
-                "subcarrier_count": simulator.subcarrier_count,
-                "frame_interval_ms": settings.CSI_FRAME_INTERVAL_MS,
-                "sequence_enabled": bool(simulator.sequence),
-                "sequence_loop": simulator.sequence_loop,
-            },
+            "source": data_source_manager.get_status(),
             "runtime": runtime_state.get_summary(),
         }
 
-    @app.post("/api/simulator/label/{label}")
-    def update_simulator_label(label: str) -> dict[str, str]:
-        active_label = _parse_label(label)
-        simulator.set_label(active_label)
-        logger.info("Simulator label changed to %s", active_label)
-        return {
-            "message": "Simulator label updated",
-            "current_label": active_label,
-        }
-
-    @app.post("/api/simulator/room/{room}")
-    def update_simulator_room(room: str) -> dict[str, str]:
-        if not room.strip():
-            raise HTTPException(status_code=400, detail="Room cannot be empty")
-
-        simulator.set_room(room)
-        logger.info("Simulator room changed to %s", simulator.room)
-        return {
-            "message": "Simulator room updated",
-            "room": simulator.room,
-        }
-
-    @app.post("/api/simulator/device/{device_id}")
-    def update_simulator_device(device_id: str) -> dict[str, str]:
-        if not device_id.strip():
-            raise HTTPException(status_code=400, detail="Device id cannot be empty")
-
-        simulator.set_device(device_id)
-        logger.info("Simulator device changed to %s", simulator.device_id)
-        return {
-            "message": "Simulator device updated",
-            "device_id": simulator.device_id,
-        }
-
-    @app.post("/api/simulator/sequence")
-    def load_simulator_sequence(sequence: list[dict[str, Any]]) -> dict[str, Any]:
+    @app.post("/api/data-source/csv")
+    def switch_to_csv_source(command: CsvDataSourceCommand) -> dict[str, Any]:
         try:
-            simulator.load_sequence(sequence)
-        except ValueError as exc:
+            data_source_manager.switch_to_csv(
+                csv_path=command.csv_path,
+                room=command.room,
+                device_id=command.device_id,
+                label=command.label,
+            )
+        except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        logger.info("Simulator sequence loaded with %s steps", len(simulator.sequence))
+        logger.info("Data source switched to csv: %s", command.csv_path)
         return {
-            "message": "Simulator sequence loaded",
-            "sequence_length": len(simulator.sequence),
-            "sequence_loop": simulator.sequence_loop,
+            "message": "Data source switched to csv",
+            "source": data_source_manager.get_status(),
         }
 
-    @app.delete("/api/simulator/sequence")
-    def clear_simulator_sequence() -> dict[str, str]:
-        simulator.clear_sequence()
-        logger.info("Simulator sequence cleared")
-        return {"message": "Simulator sequence cleared"}
+    @app.get("/api/data-source/status")
+    def get_data_source_status() -> dict[str, Any]:
+        return data_source_manager.get_status()
 
     @app.get("/api/results/latest")
     def get_latest_result() -> dict[str, Any]:
@@ -201,7 +165,7 @@ def create_app() -> FastAPI:
 
         try:
             while True:
-                frame = simulator.next_frame()
+                frame = data_source_manager.get_current_source().next_frame()
                 result = detector.predict(frame)
                 runtime_state.add(frame, result)
                 alert_saved = save_alert_if_needed(result, frame) is not None
@@ -248,12 +212,6 @@ def save_alert_if_needed(result: DetectionResult, frame: CsiFrame) -> Any | None
         return alert
     finally:
         db.close()
-
-
-def _parse_label(label: str) -> ActivityLabel:
-    if label not in VALID_LABELS:
-        raise HTTPException(status_code=400, detail="Invalid simulator label")
-    return cast(ActivityLabel, label)
 
 
 app = create_app()
