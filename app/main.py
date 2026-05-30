@@ -14,8 +14,15 @@ from app.core.logging_config import setup_logging
 from app.db import models
 from app.db.database import Base, SessionLocal, engine, get_db
 from app.schemas.alert import AlertEventCreate, AlertEventRead, AlertEventUpdate
-from app.schemas.csi import CsiFrame, CsvDataSourceCommand, DetectionResult
+from app.schemas.csi import (
+    CsiFrame,
+    CsvDataSourceCommand,
+    DetectionResult,
+    DetectorModeCommand,
+    EnetFallDataSourceCommand,
+)
 from app.services.alert import AlertService
+from app.services.enetfall_detector import ENetFallDetector
 from app.services.data_source_manager import DataSourceManager
 from app.services.detector import SimpleFallDetector
 from app.services.runtime_state import RuntimeState
@@ -29,7 +36,9 @@ logger.info("Application database tables initialized")
 ALERT_COOLDOWN_SECONDS = 10
 
 data_source_manager = DataSourceManager()
-detector = SimpleFallDetector()
+simple_detector = SimpleFallDetector()
+enetfall_detector = ENetFallDetector()
+detector_mode = settings.DETECTOR_MODE if settings.DETECTOR_MODE in {"simple", "enetfall"} else "enetfall"
 runtime_state = RuntimeState()
 alert_service = AlertService()
 last_alert_time = 0.0
@@ -95,9 +104,44 @@ def create_app() -> FastAPI:
             "source": data_source_manager.get_status(),
         }
 
+    @app.post("/api/data-source/enetfall")
+    def switch_to_enetfall_source(command: EnetFallDataSourceCommand) -> dict[str, Any]:
+        try:
+            data_source_manager.switch_to_enetfall(
+                data_dir=command.data_dir,
+                dataset_names=command.dataset_names,
+                device_id=command.device_id,
+                room=command.room,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        logger.info("Data source switched to ENetFall MAT replay")
+        return {
+            "message": "Data source switched to ENetFall MAT replay",
+            "source": data_source_manager.get_status(),
+        }
+
     @app.get("/api/data-source/status")
     def get_data_source_status() -> dict[str, Any]:
         return data_source_manager.get_status()
+
+    @app.get("/api/model/status")
+    def get_model_status() -> dict[str, Any]:
+        status = enetfall_detector.get_status()
+        status["active_detector_mode"] = detector_mode
+        return status
+
+    @app.post("/api/detector/mode")
+    def update_detector_mode(command: DetectorModeCommand) -> dict[str, Any]:
+        global detector_mode
+        detector_mode = command.mode
+        logger.info("Detector mode changed to %s", detector_mode)
+        return {
+            "message": "Detector mode updated",
+            "mode": detector_mode,
+            "model": enetfall_detector.get_status(),
+        }
 
     @app.get("/api/results/latest")
     def get_latest_result() -> dict[str, Any]:
@@ -112,7 +156,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/detector/reset")
     def reset_detector() -> dict[str, str]:
-        detector.reset()
+        simple_detector.reset()
+        enetfall_detector.reset()
         global runtime_state
         runtime_state = RuntimeState()
         return {"message": "Detector and runtime state reset"}
@@ -165,8 +210,7 @@ def create_app() -> FastAPI:
 
         try:
             while True:
-                frame = data_source_manager.get_current_source().next_frame()
-                result = detector.predict(frame)
+                frame, result = _next_detection()
                 runtime_state.add(frame, result)
                 alert_saved = save_alert_if_needed(result, frame) is not None
                 await websocket.send_json(
@@ -183,6 +227,18 @@ def create_app() -> FastAPI:
             return
 
     return app
+
+
+def _next_detection() -> tuple[CsiFrame, DetectionResult]:
+    source = data_source_manager.get_current_source()
+    if detector_mode == "enetfall" and hasattr(source, "next_window"):
+        frame, window, _ = source.next_window()
+        result = enetfall_detector.predict_window(frame, window)
+        return frame, result
+
+    frame = source.next_frame()
+    result = simple_detector.predict(frame)
+    return frame, result
 
 
 def save_alert_if_needed(result: DetectionResult, frame: CsiFrame) -> Any | None:

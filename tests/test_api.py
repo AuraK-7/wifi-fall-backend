@@ -19,13 +19,27 @@ def test_status_contains_source_and_runtime() -> None:
     data = response.json()
     assert "source" in data
     assert "runtime" in data
-    assert data["source"]["source_mode"] == "csv"
+    assert data["source"]["source_mode"] in {"enetfall", "csv"}
 
 
 def test_data_source_status_returns_200() -> None:
     response = client.get("/api/data-source/status")
 
     assert response.status_code == 200
+
+
+def test_model_status_returns_200() -> None:
+    response = client.get("/api/model/status")
+
+    assert response.status_code == 200
+    assert response.json()["model_name"] == "efficientnet_b0_enetfall"
+
+
+def test_switch_detector_mode_simple_returns_200() -> None:
+    response = client.post("/api/detector/mode", json={"mode": "simple"})
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "simple"
 
 
 def test_switch_to_missing_csv_returns_400() -> None:

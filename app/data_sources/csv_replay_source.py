@@ -67,6 +67,8 @@ class CsvReplayCsiSource(BaseCsiSource):
             room=room,
             subcarriers=subcarriers,
             simulated_label=label,
+            source="csv",
+            label=label,
         )
 
     def set_label(self, label: ActivityLabel) -> None:
@@ -148,6 +150,9 @@ class CsvReplayCsiSource(BaseCsiSource):
             "lying": "lying",
             "fall": "fall",
             "falling": "fall",
+            "non_fall": "non_fall",
+            "nonfall": "non_fall",
+            "not_fall": "non_fall",
             "empty": "empty",
             "none": "empty",
             "unknown": "unknown",

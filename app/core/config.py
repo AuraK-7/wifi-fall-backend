@@ -7,6 +7,14 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
     DATABASE_URL: str = "sqlite:///./wifi_fall_guard.db"
+    DETECTOR_MODE: str = "enetfall"
+    ENETFALL_DATA_DIR: str = (
+        "D:\\2026_spring\\IoT\\wifiFall\\data\\ENetFall_dataset_trained_networks"
+    )
+    ENETFALL_MODEL_PATH: str = (
+        "D:\\2026_spring\\IoT\\wifiFall\\data\\ENetFall_dataset_trained_networks\\"
+        "B0(modified)_trained_with_all_data.pth"
+    )
 
     CSI_FRAME_INTERVAL_MS: int = 100
     CSI_SUBCARRIER_COUNT: int = 64

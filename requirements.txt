@@ -7,3 +7,6 @@ httpx
 sqlalchemy
 python-dotenv
 pandas
+torch
+torchvision
+scipy

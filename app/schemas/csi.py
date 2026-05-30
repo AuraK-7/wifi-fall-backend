@@ -1,9 +1,9 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
-ActivityLabel = Literal["empty", "walking", "sitting", "lying", "fall", "unknown"]
+ActivityLabel = Literal["empty", "walking", "sitting", "lying", "fall", "non_fall", "unknown"]
 RiskLevel = Literal["low", "medium", "high"]
 
 
@@ -21,6 +21,9 @@ class CsiFrame(BaseModel):
     room: str
     subcarriers: list[float] = Field(..., min_length=1)
     simulated_label: ActivityLabel = "unknown"
+    source: str = "csv"
+    window_shape: list[int] | None = None
+    label: ActivityLabel | None = None
 
 
 class DetectionResult(BaseModel):
@@ -32,7 +35,7 @@ class DetectionResult(BaseModel):
     alert: bool
     reason: str = ""
     activity_score: float = Field(0.0, ge=0.0, le=1.0)
-    features: dict[str, float] = Field(default_factory=dict)
+    features: dict[str, Any] = Field(default_factory=dict)
 
 
 class CsiStreamMessage(BaseModel):
@@ -50,6 +53,17 @@ class CsvDataSourceCommand(BaseModel):
     room: str = "real_room"
     device_id: str = "csv-node-001"
     label: ActivityLabel = "unknown"
+
+
+class EnetFallDataSourceCommand(BaseModel):
+    data_dir: str | None = None
+    dataset_names: list[str] | None = None
+    device_id: str = "enetfall-node-001"
+    room: str = "home"
+
+
+class DetectorModeCommand(BaseModel):
+    mode: Literal["simple", "enetfall"]
 
 
 class RecentResultItem(BaseModel):

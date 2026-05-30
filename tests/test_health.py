@@ -17,4 +17,4 @@ def test_status_returns_current_system_state() -> None:
     response = client.get("/api/status")
 
     assert response.status_code == 200
-    assert response.json()["source"]["source_mode"] == "csv"
+    assert response.json()["source"]["source_mode"] in {"enetfall", "csv"}

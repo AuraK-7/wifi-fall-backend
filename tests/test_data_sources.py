@@ -40,6 +40,20 @@ def test_switch_to_csv_api_returns_200(tmp_path: Path) -> None:
     assert response.json()["source"]["source_mode"] == "csv"
 
 
+def test_switch_to_missing_enetfall_source_returns_400() -> None:
+    response = client.post(
+        "/api/data-source/enetfall",
+        json={
+            "data_dir": "data/not_exists_enetfall",
+            "dataset_names": ["missing.mat"],
+            "room": "home",
+            "device_id": "enetfall-test-node",
+        },
+    )
+
+    assert response.status_code == 400
+
+
 def test_csv_replay_source_returns_fixed_length_frame(tmp_path: Path) -> None:
     csv_path = tmp_path / "sample_csi.csv"
     csv_path.write_text(
