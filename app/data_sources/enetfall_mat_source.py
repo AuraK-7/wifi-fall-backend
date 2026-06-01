@@ -172,8 +172,9 @@ class EnetFallMatDataSource(BaseCsiSource):
         return data_tensor - mean_value
 
     def _preview_subcarriers(self, sample: torch.Tensor) -> list[float]:
-        flattened = sample.flatten()[: settings.CSI_SUBCARRIER_COUNT]
-        return [round(float(value), 6) for value in flattened]
+        avg_across_antennas = sample.mean(dim=0)          # [625, 30]
+        latest_slice = avg_across_antennas[-1, :]          # [30]
+        return [round(float(v), 6) for v in latest_slice]
 
     def _label_from_idx(self, label_idx: int) -> ActivityLabel:
         if label_idx == 1:

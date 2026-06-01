@@ -1,41 +1,91 @@
 import time
 from typing import Any
 
-from app.schemas.csi import CsiFrame, DetectionResult, RecentResultItem
+from app.schemas.csi import AnalyticsSnapshot, CsiFrame, DetectionResult, RecentResultItem
 
 
 class RuntimeState:
-    def __init__(self, max_items: int = 300) -> None:
+    def __init__(self, max_items: int = 300, max_analytics: int = 600) -> None:
         self.latest_frame: CsiFrame | None = None
         self.latest_result: DetectionResult | None = None
+        self.latest_analytics: AnalyticsSnapshot | None = None
         self.recent_items: list[RecentResultItem] = []
         self.max_items = max_items
         self.alert_count = 0
         self.total_frames = 0
         self.started_at = time.time()
+        # Ring buffer: frame_id → analytics snapshot
+        self._analytics_buffer: dict[int, dict[str, Any]] = {}
+        self._analytics_frame_ids: list[int] = []
+        self._frame_id_timestamps: dict[int, float] = {}
+        self._max_analytics = max_analytics
 
-    def add(self, frame: CsiFrame, result: DetectionResult) -> None:
+    def add(
+        self,
+        frame: CsiFrame,
+        result: DetectionResult,
+        analytics: AnalyticsSnapshot | None = None,
+    ) -> None:
         self.latest_frame = frame
         self.latest_result = result
+        self.latest_analytics = analytics
         self.recent_items.append(RecentResultItem(frame=frame, result=result))
 
         if len(self.recent_items) > self.max_items:
-            self.recent_items = self.recent_items[-self.max_items :]
+            self.recent_items = self.recent_items[-self.max_items:]
 
         self.total_frames += 1
         if result.alert:
             self.alert_count += 1
+
+        if analytics is not None:
+            fid = frame.frame_id
+            self._analytics_buffer[fid] = analytics.model_dump()
+            self._analytics_frame_ids.append(fid)
+            self._frame_id_timestamps[fid] = frame.timestamp
+            if len(self._analytics_frame_ids) > self._max_analytics:
+                oldest = self._analytics_frame_ids.pop(0)
+                self._analytics_buffer.pop(oldest, None)
+                self._frame_id_timestamps.pop(oldest, None)
+
+    def find_closest_frame_id(self, timestamp: float) -> int:
+        """Return the frame_id whose timestamp is closest to *timestamp*."""
+        best_fid = 0
+        best_dist = float("inf")
+        for fid, ts in self._frame_id_timestamps.items():
+            dist = abs(ts - timestamp)
+            if dist < best_dist:
+                best_dist = dist
+                best_fid = fid
+        return best_fid
+
+    def get_analytics_by_frame_id(self, frame_id: int) -> dict[str, Any] | None:
+        return self._analytics_buffer.get(frame_id)
+
+    def get_analytics_window(
+        self, centre_frame_id: int, before: int = 100, after: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return analytics snapshots around *centre_frame_id*."""
+        results: list[dict[str, Any]] = []
+        for fid in self._analytics_frame_ids:
+            if centre_frame_id - before <= fid <= centre_frame_id + after:
+                snap = self._analytics_buffer.get(fid)
+                if snap is not None:
+                    results.append({"frame_id": fid, **snap})
+        return results
 
     def get_latest(self) -> dict[str, Any]:
         if self.latest_frame is None or self.latest_result is None:
             return {
                 "frame": None,
                 "result": None,
+                "analytics": None,
             }
 
         return {
             "frame": self.latest_frame,
             "result": self.latest_result,
+            "analytics": self.latest_analytics,
         }
 
     def get_recent(self, limit: int = 50) -> list[RecentResultItem]:

@@ -19,6 +19,7 @@ class AlertService:
             risk_level=alert_in.risk_level,
             activity_score=alert_in.activity_score,
             reason=alert_in.reason,
+            analytics_snapshot=alert_in.analytics_snapshot,
         )
         db.add(alert)
         db.commit()

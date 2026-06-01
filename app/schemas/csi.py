@@ -38,9 +38,21 @@ class DetectionResult(BaseModel):
     features: dict[str, Any] = Field(default_factory=dict)
 
 
+class AnalyticsSnapshot(BaseModel):
+    """Pre-computed signal features for multi-view visualisation."""
+    micro_doppler_spectrum: list[float] = Field(..., min_length=128, max_length=128)
+    subcarrier_amplitudes: list[float] = Field(..., min_length=30, max_length=30)
+    antenna_correlation: float = Field(..., ge=-1.0, le=1.0)
+    energy: float = Field(..., ge=0.0)
+    dominant_freq: float
+    frequency_spread: float = Field(..., ge=0.0)
+    signal_variance: float = Field(..., ge=0.0)
+
+
 class CsiStreamMessage(BaseModel):
     frame: CsiFrame
     result: DetectionResult
+    analytics: AnalyticsSnapshot | None = None
 
 
 class SimulatorCommand(BaseModel):
