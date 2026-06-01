@@ -28,6 +28,7 @@ from app.schemas.csi import (
 from app.services.alert import AlertService
 from app.services.enetfall_detector import ENetFallDetector
 from app.services.data_source_manager import DataSourceManager
+from app.data_sources.enetfall_mat_source import EnetFallMatDataSource
 from app.services.detector import SimpleFallDetector
 from app.services.runtime_state import RuntimeState
 from app.services.signal_processor import compute_analytics
@@ -224,6 +225,45 @@ def create_app() -> FastAPI:
             "frames": frames_out
         }
 
+    @app.get("/api/events/{event_id}/replay")
+    def get_event_replay(
+        event_id: str,
+        before: int = Query(default=120, ge=20, le=300),
+        after: int = Query(default=40, ge=10, le=150),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Return analytics windows around an alert event for 3D replay.
+
+        Finds the nearest non_fall→fall transition BEFORE the alert frame,
+        then returns a long stretch of walking (before) leading into the fall.
+        """
+        alert = alert_service.get_alert(db, event_id)
+        if alert is None:
+            raise HTTPException(status_code=404, detail="Alert event not found")
+
+        chain = runtime_state.get_evidence_chain(alert.frame_id or 0)
+        if chain:
+            # Map evidence entries to frontend format: predicted_label → label
+            windows = []
+            for entry in chain:
+                windows.append({
+                    "window_index": entry.get("window_index", 0),
+                    "room": alert.room,
+                    "analytics": entry.get("analytics"),
+                    "label": entry.get("predicted_label", "unknown"),
+                    "confidence": entry.get("confidence"),
+                })
+            return {
+                "event_id": event_id,
+                "start_window_index": windows[0]["window_index"] if windows else 0,
+                "end_window_index": windows[-1]["window_index"] if windows else 0,
+                "centre_window_index": alert.frame_id or 0,
+                "window_count": len(windows),
+                "windows": windows,
+            }
+
+        raise HTTPException(status_code=404, detail="No evidence chain — replay unavailable for this alert")
+
     @app.post("/api/detector/reset")
     def reset_detector() -> dict[str, str]:
         simple_detector.reset()
@@ -331,6 +371,10 @@ def create_app() -> FastAPI:
                             )
 
                     runtime_state.add(frame, result, analytics)
+
+                    if result.alert:
+                        runtime_state.start_evidence_chain(frame.frame_id)
+
                     alert_saved = False
                     try:
                         alert_saved = (
@@ -399,6 +443,7 @@ def save_alert_if_needed(
     result: DetectionResult,
     frame: CsiFrame,
     analytics: dict[str, Any] | None = None,
+    
 ) -> Any | None:
     if not result.alert:
         return None
@@ -420,6 +465,7 @@ def save_alert_if_needed(
             activity_score=result.activity_score,
             reason=result.reason,
             analytics_snapshot=analytics,
+            frame_id=frame.frame_id,
         )
         alert = alert_service.create_alert(db, alert_in)
         last_alert_time = now

@@ -20,6 +20,8 @@ class AlertService:
             activity_score=alert_in.activity_score,
             reason=alert_in.reason,
             analytics_snapshot=alert_in.analytics_snapshot,
+            frame_id=alert_in.frame_id,
+            evidence_chain=alert_in.evidence_chain,
         )
         db.add(alert)
         db.commit()

@@ -82,6 +82,31 @@ class EnetFallMatDataSource(BaseCsiSource):
         label = frame.label or frame.simulated_label
         return frame, window, label
 
+    def get_window_at(self, index: int) -> torch.Tensor | None:
+        """Return [1,3,625,30] tensor at *index* without advancing the stream pointer."""
+        if index < 0 or index >= self.total_samples:
+            return None
+        return self.processed_tensor[index].unsqueeze(0).clone()
+
+    def get_label_at(self, index: int) -> ActivityLabel:
+        return self._label_from_idx(int(self.labels[index]))
+
+    def get_room_at(self, index: int) -> str:
+        return self.sample_rooms[index] or self.room
+
+    @staticmethod
+    def create_reader(
+        data_dir: str | None = None,
+        dataset_names: list[str] | None = None,
+    ) -> "EnetFallMatDataSource":
+        """Create an independent reader instance (does not affect WebSocket stream)."""
+        return EnetFallMatDataSource(
+            data_dir=data_dir or settings.ENETFALL_DATA_DIR,
+            dataset_names=dataset_names or DEFAULT_ENETFALL_DATASETS,
+            device_id="enetfall-reader",
+            room="archive",
+        )
+
     def set_label(self, label: ActivityLabel) -> None:
         self.current_label = label
 
