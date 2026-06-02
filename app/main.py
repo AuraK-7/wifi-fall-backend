@@ -23,7 +23,13 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.db import models
-from app.db.database import Base, SessionLocal, engine, get_db
+from app.db.database import (
+    Base,
+    SessionLocal,
+    engine,
+    ensure_sqlite_schema_compatibility,
+    get_db,
+)
 from app.schemas.alert import AlertEventCreate, AlertEventRead, AlertEventUpdate
 from app.schemas.csi import (
     AnalyticsSnapshot,
@@ -46,6 +52,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 Base.metadata.create_all(bind=engine)
+ensure_sqlite_schema_compatibility()
 logger.info("Application database tables initialized")
 
 ALERT_COOLDOWN_SECONDS = 10
@@ -183,11 +190,20 @@ def create_app() -> FastAPI:
         latest = runtime_state.get_latest()
         if latest["frame"] is None or latest["result"] is None:
             raise HTTPException(status_code=404, detail="No CSI result available")
+        latest["avatar"] = _avatar_payload(latest["frame"], latest["result"])
         return latest
 
     @app.get("/api/results/recent")
-    def get_recent_results(limit: int = Query(default=50, ge=1, le=300)) -> list[Any]:
-        return runtime_state.get_recent(limit=limit)
+    def get_recent_results(limit: int = Query(default=50, ge=1, le=300)) -> list[dict[str, Any]]:
+        items = runtime_state.get_recent(limit=limit)
+        return [
+            {
+                "frame": item.frame,
+                "result": item.result,
+                "avatar": _avatar_payload(item.frame, item.result),
+            }
+            for item in items
+        ]
 
     @app.get("/api/sequences")
     def get_sequence(
@@ -240,6 +256,7 @@ def create_app() -> FastAPI:
                 "activity_type": activity_type,
                 "true_label": "fall" if target_label == 1 else "walk",
                 "true_label_id": target_label,
+                "avatar_state": _label_to_avatar_state("fall" if target_label == 1 else "non_fall"),
                 "sample_index": sample_index,
                 "total_samples_of_type": int(len(indices)),
                 "total_frames_raw": int(spectrogram.shape[1]),
@@ -680,6 +697,7 @@ def create_app() -> FastAPI:
                         {
                             "frame": frame.model_dump(),
                             "result": result.model_dump(),
+                            "avatar": _avatar_payload(frame, result),
                             "summary": runtime_state.get_summary(),
                             "alert_saved": alert_saved,
                             "analytics": analytics_dict,
@@ -730,6 +748,32 @@ def _next_detection() -> tuple[CsiFrame, DetectionResult, torch.Tensor | None]:
     frame = source.next_frame()
     result = simple_detector.predict(frame)
     return frame, result, None
+
+
+def _avatar_payload(frame: CsiFrame, result: DetectionResult) -> dict[str, Any]:
+    """Map dataset/model labels to the two states supported by the 3D avatar."""
+    dataset_label = frame.label or frame.simulated_label
+    predicted_label = result.predicted_label
+    dataset_state = _label_to_avatar_state(dataset_label)
+    predicted_state = _label_to_avatar_state(predicted_label)
+
+    return {
+        "display_state": dataset_state,
+        "dataset_state": dataset_state,
+        "predicted_state": predicted_state,
+        "source": "dataset_label",
+        "dataset_label": dataset_label,
+        "predicted_label": predicted_label,
+        "confidence": result.confidence,
+        "risk_level": result.risk_level,
+        "alert": result.alert,
+    }
+
+
+def _label_to_avatar_state(label: str | None) -> str:
+    if label == "fall":
+        return "fallen"
+    return "standing"
 
 
 
