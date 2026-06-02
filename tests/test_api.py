@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import _avatar_payload, app
+from app.schemas.csi import CsiFrame, DetectionResult
 
 
 client = TestClient(app)
@@ -66,3 +67,31 @@ def test_detector_reset_returns_200() -> None:
     response = client.post("/api/detector/reset")
 
     assert response.status_code == 200
+
+
+def test_avatar_payload_maps_prediction_to_3d_state() -> None:
+    frame = CsiFrame(
+        frame_id=1,
+        device_id="test-node",
+        timestamp=123.0,
+        room="lab",
+        subcarriers=[0.1],
+        simulated_label="non_fall",
+        label="non_fall",
+    )
+    result = DetectionResult(
+        timestamp=123.0,
+        room="lab",
+        predicted_label="fall",
+        confidence=0.91,
+        risk_level="high",
+        alert=True,
+        activity_score=0.91,
+    )
+
+    avatar = _avatar_payload(frame, result)
+
+    assert avatar["display_state"] == "standing"
+    assert avatar["dataset_state"] == "standing"
+    assert avatar["predicted_state"] == "fallen"
+    assert avatar["source"] == "dataset_label"
