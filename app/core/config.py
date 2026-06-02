@@ -12,10 +12,16 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
     DATABASE_URL: str = "sqlite:///./wifi_fall_guard.db"
-    DETECTOR_MODE: str = "enetfall"
+    DETECTOR_MODE: str = "cnn2d"
     ENETFALL_DATA_DIR: str = str(DEFAULT_ENETFALL_DIR)
     ENETFALL_MODEL_PATH: str = str(
         DEFAULT_ENETFALL_DIR / "B0(modified)_trained_with_all_data.pth"
+    )
+    CNN2D_MODEL_PATH: str = str(
+        BASE_DIR / "data" / "checkpoints" / "lightweight_2dcnn_best.pth"
+    )
+    CNN2D_NORMALIZER_DIR: str = str(
+        BASE_DIR / "data" / "checkpoints" / "normalizer"
     )
 
     CSI_FRAME_INTERVAL_MS: int = 100
@@ -23,7 +29,8 @@ class Settings(BaseSettings):
     CSI_WINDOW_SIZE: int = 30
     DEFAULT_ROOM: str = "bedroom"
 
-    FALL_CONFIDENCE_THRESHOLD: float = 0.75
+    FALL_CONFIDENCE_THRESHOLD: float = 0.70
+    NLOS_FALL_THRESHOLD: float = 0.85
     HIGH_ENERGY_THRESHOLD: float = 30.0
     LOW_ACTIVITY_THRESHOLD: float = 2.0
 

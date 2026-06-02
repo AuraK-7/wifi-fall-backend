@@ -41,7 +41,7 @@ class DetectionResult(BaseModel):
 class AnalyticsSnapshot(BaseModel):
     """Pre-computed signal features for multi-view visualisation."""
     micro_doppler_spectrum: list[float] = Field(..., min_length=128, max_length=128)
-    subcarrier_amplitudes: list[float] = Field(..., min_length=30, max_length=30)
+    subcarrier_amplitudes: list[float] = Field(..., min_length=1, max_length=90)
     antenna_correlation: float = Field(..., ge=-1.0, le=1.0)
     energy: float = Field(..., ge=0.0)
     dominant_freq: float
@@ -75,7 +75,7 @@ class EnetFallDataSourceCommand(BaseModel):
 
 
 class DetectorModeCommand(BaseModel):
-    mode: Literal["simple", "enetfall"]
+    mode: Literal["simple", "enetfall", "cnn2d"]
 
 
 class RecentResultItem(BaseModel):

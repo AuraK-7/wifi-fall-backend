@@ -21,14 +21,28 @@ STFT_NFFT = 256          # FFT points
 
 
 def compute_analytics(window: torch.Tensor) -> dict:
-    """Compute the full analytics payload for one [3, 625, 30] window.
+    """Compute analytics for one CSI window.
 
-    Returns a dict with keys matching the AnalyticsSnapshot schema so
-    it can be embedded directly into the WebSocket JSON envelope.
+    Handles both input shapes:
+      - [3, 625, 30]  — 3‑channel B0 format (antennas × time × subcarriers)
+      - [1, 625, 90]  — single‑channel 2D‑CNN format
     """
-    arr = window.detach().cpu().numpy().astype(np.float32)  # [3, 625, 30]
+    arr = window.detach().cpu().numpy().astype(np.float32)
 
-    ts_1d = arr.mean(axis=0).mean(axis=1)                     # [625]
+    # Collapse all leading dims (antenna / channel) → [T, S] 2‑D matrix
+    if arr.ndim == 3:
+        # Average across the first (antenna/channel) dimension
+        arr_2d = arr.mean(axis=0)  # [625, S]
+    elif arr.ndim == 2:
+        arr_2d = arr                # already [625, S]
+    else:
+        # Fallback: flatten all but last dim
+        arr_2d = arr.reshape(-1, arr.shape[-1]).mean(axis=0, keepdims=False)
+        if arr_2d.ndim == 1:
+            arr_2d = arr_2d.reshape(1, -1)
+
+    # 1‑D time series: average across subcarriers
+    ts_1d = arr_2d.mean(axis=1)  # [625]
 
     f, _, Zxx = scipy.signal.stft(
         ts_1d,
@@ -37,14 +51,31 @@ def compute_analytics(window: torch.Tensor) -> dict:
         noverlap=STFT_NOVERLAP,
         nfft=STFT_NFFT,
     )
-    spectrum_db = _to_db(np.abs(Zxx[1:, :]))                  # [128, T]
+    spectrum_db = _to_db(np.abs(Zxx[1:, :]))
     centre_idx = spectrum_db.shape[1] // 2
-    micro_doppler_spectrum = spectrum_db[:, centre_idx].tolist()  # [128]
-    antenna_correlation = _antenna_correlation(arr)             # scalar
+    micro_doppler_spectrum = spectrum_db[:, centre_idx].tolist()
 
-    subcarrier_amplitudes = arr.mean(axis=0)[-1, :].tolist()    # [30]
+    # Antenna / subcarrier-band correlation
+    if arr.ndim == 3 and arr.shape[0] == 3:
+        # B0 format: true 3‑antenna spatial correlation
+        antenna_correlation = _antenna_correlation(arr)
+    else:
+        # 2D‑CNN format: subcarrier-band coherence
+        # Split subcarriers into two halves, correlate them across time
+        S = arr_2d.shape[1]
+        half = S // 2
+        if half >= 4:
+            a = arr_2d[:, :half].mean(axis=1)     # mean of first half  per time step
+            b = arr_2d[:, half:].mean(axis=1)     # mean of second half per time step
+            antenna_correlation = float(np.corrcoef(a, b)[0, 1])
+        else:
+            antenna_correlation = 0.0
 
-    energy = float(np.sum(arr ** 2))
+    # Subcarrier amplitudes: last time slice of arr_2d
+    subcarrier_amplitudes = arr_2d[-1, :].tolist()
+
+    # Per-element mean energy — independent of window size, ~1.0 for Z-score data
+    energy = float(np.mean(arr ** 2))
     signal_variance = float(np.var(subcarrier_amplitudes))
 
     spec = np.abs(Zxx[1:, centre_idx]).astype(np.float64)

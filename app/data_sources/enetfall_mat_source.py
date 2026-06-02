@@ -48,6 +48,7 @@ class EnetFallMatDataSource(BaseCsiSource):
         data_all, labels_all, sample_rooms = self._load_datasets()
         self.labels = labels_all.astype(np.int64)
         self.sample_rooms = sample_rooms
+        self.raw_data = data_all  # [N, 625, 90] — kept for 2D‑CNN inference
         self.processed_tensor = self._preprocess(data_all)
 
         if self.processed_tensor.shape[0] == 0:
@@ -81,6 +82,14 @@ class EnetFallMatDataSource(BaseCsiSource):
         window = self.processed_tensor[index].unsqueeze(0)
         label = frame.label or frame.simulated_label
         return frame, window, label
+
+    def next_window_2d(self) -> tuple[CsiFrame, torch.Tensor, ActivityLabel]:
+        """Return raw [1, 625, 90] window for 2D‑CNN inference."""
+        frame = self.next_frame()
+        index = (self.current_index - 1) % self.total_samples
+        raw = torch.from_numpy(self.raw_data[index].astype(np.float32)).unsqueeze(0)
+        label = frame.label or frame.simulated_label
+        return frame, raw, label
 
     def get_window_at(self, index: int) -> torch.Tensor | None:
         """Return [1,3,625,30] tensor at *index* without advancing the stream pointer."""
