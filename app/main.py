@@ -40,6 +40,7 @@ from app.schemas.csi import (
     EnetFallDataSourceCommand,
 )
 from app.services.alert import AlertService
+from app.services.connection_manager import ConnectionManager
 from app.services.enetfall_detector import ENetFallDetector
 from app.services.cnn2d_detector import CNN2DFallDetector
 from app.services.data_source_manager import DataSourceManager
@@ -47,6 +48,7 @@ from app.data_sources.enetfall_mat_source import EnetFallMatDataSource
 from app.services.detector import SimpleFallDetector
 from app.services.runtime_state import RuntimeState
 from app.services.signal_processor import compute_analytics
+from app.api.demo import create_demo_router
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -66,6 +68,9 @@ detector_mode = settings.DETECTOR_MODE if settings.DETECTOR_MODE in VALID_MODES 
 runtime_state = RuntimeState()
 alert_service = AlertService()
 last_alert_time = 0.0
+
+
+ws_manager = ConnectionManager()
 
 # ── Training job management  ─────────────────────────────
 _TRAIN_SCRIPT = (Path(__file__).resolve().parents[1] / "train.py").as_posix()
@@ -655,9 +660,17 @@ def create_app() -> FastAPI:
     @app.websocket("/ws/csi")
     async def stream_csi(websocket: WebSocket) -> None:
         await websocket.accept()
-        logger.info("WebSocket CSI client connected")
 
-        try:
+        listen_only = websocket.query_params.get("mode") == "demo"
+        client_queue = ws_manager.register()
+        logger.info(
+            "WebSocket CSI client connected (mode=%s)",
+            "demo-listen" if listen_only else "replay",
+        )
+
+        replay_task: asyncio.Task[None] | None = None
+
+        async def _replay_loop() -> None:
             while True:
                 try:
                     frame, result, window = _next_detection()
@@ -693,7 +706,7 @@ def create_app() -> FastAPI:
                             exc_info=True,
                         )
 
-                    await websocket.send_json(
+                    await client_queue.put(
                         {
                             "frame": frame.model_dump(),
                             "result": result.model_dump(),
@@ -704,21 +717,52 @@ def create_app() -> FastAPI:
                         }
                     )
                 except WebSocketDisconnect:
-                    logger.info("WebSocket CSI client disconnected")
-                    break
+                    raise
                 except RuntimeError as e:
                     if "Cannot call" in str(e) or "close" in str(e):
-                        logger.info("WebSocket connection closed internally")
-                        break
+                        raise WebSocketDisconnect from e
                     logger.error("Error generating next detection: %s", e)
                 except Exception as e:
                     logger.error("Error generating next detection: %s", e)
                 await asyncio.sleep(settings.CSI_FRAME_INTERVAL_MS / 1000)
+
+        try:
+            if listen_only:
+                # Listen-only mode: wait for demo-trigger broadcasts
+                while True:
+                    message = await client_queue.get()
+                    try:
+                        await websocket.send_json(message)
+                    except Exception:
+                        break
+            else:
+                # Replay mode: start the replay loop and forward messages
+                replay_task = asyncio.create_task(_replay_loop())
+                while True:
+                    message = await client_queue.get()
+                    try:
+                        await websocket.send_json(message)
+                    except Exception:
+                        break
         except WebSocketDisconnect:
             logger.info("WebSocket CSI client disconnected")
         except Exception as e:
             logger.info("WebSocket terminated: %s", e)
+        finally:
+            if replay_task is not None:
+                replay_task.cancel()
+            ws_manager.unregister(client_queue)
         return
+
+    # ── Demo single-trigger router (ENetFall) ────────────────
+    demo_router = create_demo_router(
+        detector=enetfall_detector,
+        runtime=runtime_state,
+        ws_manager=ws_manager,
+        alert_service=alert_service,
+        alert_cooldown_seconds=ALERT_COOLDOWN_SECONDS,
+    )
+    app.include_router(demo_router)
 
     return app
 

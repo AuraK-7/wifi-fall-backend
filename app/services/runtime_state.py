@@ -57,6 +57,10 @@ class RuntimeState:
                 self._completed_chains[alert_fid] = chain
                 del self._pending_chains[alert_fid]
 
+    def store_evidence_chain(self, alert_frame_id: int, chain: list[dict[str, Any]]) -> None:
+        """Directly store a pre-built evidence chain (used by single-shot demo trigger)."""
+        self._completed_chains[alert_frame_id] = chain
+
     def get_evidence_chain(self, alert_frame_id: int) -> list[dict[str, Any]] | None:
         """Return completed evidence chain, or pending chain if still collecting."""
         if alert_frame_id in self._completed_chains:
