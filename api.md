@@ -62,7 +62,7 @@ ws://127.0.0.1:8000/ws/csi
     "source_mode": "enetfall",
     "current_source": {
       "type": "enetfall_mat",
-      "data_dir": "D:\\2026_spring\\IoT\\wifiFall\\data\\ENetFall_dataset_trained_networks",
+      "data_dir": "data/ENetFall_dataset_trained_networks",
       "dataset_names": [
         "dataset_home_lab(L).mat",
         "dataset_home_lab(R).mat",
@@ -119,7 +119,7 @@ ws://127.0.0.1:8000/ws/csi
 
 ```json
 {
-  "data_dir": "D:\\2026_spring\\IoT\\wifiFall\\data\\ENetFall_dataset_trained_networks",
+  "data_dir": "data/ENetFall_dataset_trained_networks",
   "dataset_names": [
     "dataset_home_lab(L).mat",
     "dataset_home_lab(R).mat",
@@ -234,7 +234,7 @@ empty, walking, sitting, lying, fall, non_fall, unknown
   "detector_mode": "enetfall",
   "model_loaded": true,
   "model_name": "efficientnet_b0_enetfall",
-  "model_path": "D:\\2026_spring\\IoT\\wifiFall\\data\\ENetFall_dataset_trained_networks\\B0(modified)_trained_with_all_data.pth",
+  "model_path": "data/ENetFall_dataset_trained_networks/B0(modified)_trained_with_all_data.pth",
   "device": "cuda",
   "num_classes": 2,
   "class_names": ["non_fall", "fall"],

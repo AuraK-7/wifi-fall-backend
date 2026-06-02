@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,6 +13,9 @@ class AlertEventCreate(BaseModel):
     risk_level: str
     activity_score: float = Field(..., ge=0.0, le=1.0)
     reason: str = ""
+    analytics_snapshot: dict[str, Any] | None = None
+    frame_id: int | None = None
+    evidence_chain: list[dict[str, Any]] | None = None
 
 
 class AlertEventRead(BaseModel):
@@ -26,6 +30,9 @@ class AlertEventRead(BaseModel):
     reason: str | None
     handled: bool
     handler_note: str | None
+    analytics_snapshot: dict[str, Any] | None = None
+    frame_id: int | None = None
+    evidence_chain: list[dict[str, Any]] | None = None
     created_at: datetime
     updated_at: datetime
 

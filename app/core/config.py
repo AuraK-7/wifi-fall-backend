@@ -1,4 +1,9 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_ENETFALL_DIR = BASE_DIR / "data" / "ENetFall_dataset_trained_networks"
 
 
 class Settings(BaseSettings):
@@ -8,12 +13,9 @@ class Settings(BaseSettings):
     PORT: int = 8000
     DATABASE_URL: str = "sqlite:///./wifi_fall_guard.db"
     DETECTOR_MODE: str = "enetfall"
-    ENETFALL_DATA_DIR: str = (
-        "D:\\2026_spring\\IoT\\wifiFall\\data\\ENetFall_dataset_trained_networks"
-    )
-    ENETFALL_MODEL_PATH: str = (
-        "D:\\2026_spring\\IoT\\wifiFall\\data\\ENetFall_dataset_trained_networks\\"
-        "B0(modified)_trained_with_all_data.pth"
+    ENETFALL_DATA_DIR: str = str(DEFAULT_ENETFALL_DIR)
+    ENETFALL_MODEL_PATH: str = str(
+        DEFAULT_ENETFALL_DIR / "B0(modified)_trained_with_all_data.pth"
     )
 
     CSI_FRAME_INTERVAL_MS: int = 100
