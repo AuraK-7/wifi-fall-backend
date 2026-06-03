@@ -45,6 +45,7 @@ def ensure_sqlite_schema_compatibility() -> None:
         "analytics_snapshot": "JSON",
         "frame_id": "INTEGER",
         "evidence_chain": "JSON",
+        "source": "VARCHAR(50)",
     }
 
     with engine.begin() as connection:
@@ -53,3 +54,7 @@ def ensure_sqlite_schema_compatibility() -> None:
                 connection.execute(
                     text(f"ALTER TABLE alert_events ADD COLUMN {column_name} {column_type}")
                 )
+                if column_name == "source":
+                    connection.execute(
+                        text("UPDATE alert_events SET source = 'unknown' WHERE source IS NULL")
+                    )

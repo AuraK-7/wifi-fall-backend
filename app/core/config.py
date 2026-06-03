@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     TCN_NORMALIZER_DIR: str = str(
         BASE_DIR / "data" / "checkpoints" / "tcn_normalizer"
     )
+    MODEL_SEARCH_PATHS: str = ""
+    MODEL_FILE_EXTENSIONS: str = ".pt,.pth"
 
     CSI_FRAME_INTERVAL_MS: int = 100
     CSI_SUBCARRIER_COUNT: int = 64

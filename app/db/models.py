@@ -19,9 +19,10 @@ class AlertEvent(Base):
     risk_level: Mapped[str] = mapped_column(String(50), nullable=False)
     activity_score: Mapped[float] = mapped_column(Float, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
     analytics_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     frame_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    evidence_chain: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    evidence_chain: Mapped[list | None] = mapped_column(JSON, nullable=True)
     handled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     handler_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

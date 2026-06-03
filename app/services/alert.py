@@ -14,6 +14,7 @@ class AlertService:
             timestamp=alert_in.timestamp,
             room=alert_in.room,
             device_id=alert_in.device_id,
+            source=alert_in.source,
             predicted_label=alert_in.predicted_label,
             confidence=alert_in.confidence,
             risk_level=alert_in.risk_level,
