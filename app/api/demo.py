@@ -162,7 +162,7 @@ def create_demo_router(
                     try:
                         alert_in = AlertEventCreate(
                             timestamp=result.timestamp, room=result.room,
-                            device_id=frame.device_id,
+                            device_id=frame.device_id, source="demo_trigger",
                             predicted_label=result.predicted_label,
                             confidence=result.confidence, risk_level=result.risk_level,
                             activity_score=result.activity_score, reason=result.reason,

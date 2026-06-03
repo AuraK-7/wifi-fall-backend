@@ -8,6 +8,7 @@ class AlertEventCreate(BaseModel):
     timestamp: float
     room: str
     device_id: str
+    source: str = "demo_trigger"
     predicted_label: str
     confidence: float = Field(..., ge=0.0, le=1.0)
     risk_level: str
@@ -23,6 +24,7 @@ class AlertEventRead(BaseModel):
     timestamp: float
     room: str
     device_id: str
+    source: str | None = None
     predicted_label: str
     confidence: float
     risk_level: str
@@ -33,8 +35,8 @@ class AlertEventRead(BaseModel):
     analytics_snapshot: dict[str, Any] | None = None
     frame_id: int | None = None
     evidence_chain: list[dict[str, Any]] | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

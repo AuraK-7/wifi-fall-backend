@@ -1329,6 +1329,7 @@ def save_alert_if_needed(
             timestamp=result.timestamp,
             room=result.room,
             device_id=frame.device_id,
+            source="replay",
             predicted_label=result.predicted_label,
             confidence=result.confidence,
             risk_level=result.risk_level,
