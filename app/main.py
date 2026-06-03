@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -42,6 +42,7 @@ from app.schemas.csi import (
 from app.services.alert import AlertService
 from app.services.enetfall_detector import ENetFallDetector
 from app.services.cnn2d_detector import CNN2DFallDetector
+from app.services.tcn_detector import TCNTransformerFallDetector
 from app.services.data_source_manager import DataSourceManager
 from app.data_sources.enetfall_mat_source import EnetFallMatDataSource
 from app.services.detector import SimpleFallDetector
@@ -61,24 +62,108 @@ data_source_manager = DataSourceManager()
 simple_detector = SimpleFallDetector()
 enetfall_detector = ENetFallDetector()
 cnn2d_detector = CNN2DFallDetector()
-VALID_MODES = {"simple", "enetfall", "cnn2d"}
+tcn_detector = TCNTransformerFallDetector()
+VALID_MODES = {"simple", "enetfall", "cnn2d", "tcn"}
 detector_mode = settings.DETECTOR_MODE if settings.DETECTOR_MODE in VALID_MODES else "cnn2d"
 runtime_state = RuntimeState()
 alert_service = AlertService()
 last_alert_time = 0.0
 
 # ── Training job management  ─────────────────────────────
-_TRAIN_SCRIPT = (Path(__file__).resolve().parents[1] / "train.py").as_posix()
+_TRAIN_SCRIPT_CNN2D = (Path(__file__).resolve().parents[1] / "train.py").as_posix()
+_TRAIN_SCRIPT_TCN = (Path(__file__).resolve().parents[1] / "train_tcn.py").as_posix()
 _JOBS_DIR = (Path(__file__).resolve().parents[1] / "data" / "jobs")
 _JOBS_DIR.mkdir(parents=True, exist_ok=True)
 _training_jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
+_JOB_META_FILENAME = "job.json"
+
+
+def _job_meta_path(job_id: str) -> Path:
+    return _JOBS_DIR / job_id / _JOB_META_FILENAME
+
+
+def _persist_job(job: dict[str, Any]) -> None:
+    try:
+        import json as _json
+
+        job_id = str(job.get("job_id", ""))
+        if not job_id:
+            return
+        meta_path = _job_meta_path(job_id)
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(_json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _load_jobs_from_disk() -> None:
+    import json as _json
+
+    if not _JOBS_DIR.exists():
+        return
+
+    loaded: dict[str, dict[str, Any]] = {}
+    for job_dir in _JOBS_DIR.iterdir():
+        if not job_dir.is_dir():
+            continue
+
+        job_id = job_dir.name
+        meta_path = job_dir / _JOB_META_FILENAME
+        job: dict[str, Any] | None = None
+        if meta_path.exists():
+            try:
+                job = _json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                job = None
+        if job is None:
+            output_path = job_dir / "training_results.json"
+            log_path = job_dir / "training.log"
+            if output_path.exists():
+                model_type = "cnn2d"
+                best_val_f1 = None
+                try:
+                    results = _json.loads(output_path.read_text(encoding="utf-8", errors="replace"))
+                    if isinstance(results, dict):
+                        model_name = str(results.get("model", "")).lower()
+                        if "temporalconvtransformer" in model_name:
+                            model_type = "tcn"
+                        best_val_f1 = results.get("best_val_f1")
+                except Exception:
+                    pass
+                job = {
+                    "job_id": job_id,
+                    "status": "completed",
+                    "params": {"model_type": model_type},
+                    "started_at": None,
+                    "finished_at": None,
+                    "output_path": str(output_path),
+                    "log_path": str(log_path),
+                    "pid": None,
+                    "error": None,
+                    "best_val_f1": best_val_f1,
+                    "applied": False,
+                }
+            else:
+                continue
+
+        if job.get("status") in ("running", "pending"):
+            job["status"] = "unknown"
+            job["pid"] = None
+            job["error"] = "Server restarted; previous running job state not recoverable"
+
+        loaded[job_id] = job
+
+    with _jobs_lock:
+        _training_jobs.clear()
+        _training_jobs.update(loaded)
 
 _ = models
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    _load_jobs_from_disk()
     logger.info("Application startup complete")
     yield
 
@@ -159,7 +244,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/model/status")
     def get_model_status() -> dict[str, Any]:
-        if detector_mode == "cnn2d":
+        if detector_mode == "tcn":
+            status = tcn_detector.get_status()
+        elif detector_mode == "cnn2d":
             status = cnn2d_detector.get_status()
         else:
             status = enetfall_detector.get_status()
@@ -176,9 +263,12 @@ def create_app() -> FastAPI:
             )
         detector_mode = command.mode
         logger.info("Detector mode changed to %s", detector_mode)
-        active = (
-            cnn2d_detector if detector_mode == "cnn2d" else enetfall_detector
-        )
+        if detector_mode == "tcn":
+            active = tcn_detector
+        elif detector_mode == "cnn2d":
+            active = cnn2d_detector
+        else:
+            active = enetfall_detector
         return {
             "message": "Detector mode updated",
             "mode": detector_mode,
@@ -315,6 +405,7 @@ def create_app() -> FastAPI:
         simple_detector.reset()
         enetfall_detector.reset()
         cnn2d_detector.reset()
+        tcn_detector.reset()
         global runtime_state
         runtime_state = RuntimeState()
         return {"message": "Detector and runtime state reset"}
@@ -324,6 +415,7 @@ def create_app() -> FastAPI:
     # ═══════════════════════════════════════════════════════════════
 
     class TrainStartRequest(BaseModel):
+        model_type: Literal["cnn2d", "tcn"] = Field(default="cnn2d")
         epochs: int = Field(default=200, ge=50, le=300)
         batch_size: int = Field(default=32, ge=8, le=128)
         lr: float = Field(default=0.0005, ge=0.0001, le=0.01)
@@ -332,6 +424,9 @@ def create_app() -> FastAPI:
         p_stretch: float = Field(default=0.5, ge=0.0, le=1.0)
         p_noise: float = Field(default=0.5, ge=0.0, le=1.0)
         weight_decay: float = Field(default=1e-4, ge=1e-5, le=1e-3)
+        threshold_objective: Literal["f1", "precision"] = Field(default="f1")
+        target_precision: float = Field(default=0.8, ge=0.5, le=0.99)
+        min_recall: float = Field(default=0.2, ge=0.0, le=0.99)
 
     @app.post("/api/train/start")
     def train_start(req: TrainStartRequest) -> dict[str, Any]:
@@ -350,8 +445,9 @@ def create_app() -> FastAPI:
             output_path = job_dir / "training_results.json"
             log_path = job_dir / "training.log"
 
+            train_script = _TRAIN_SCRIPT_CNN2D if req.model_type == "cnn2d" else _TRAIN_SCRIPT_TCN
             cmd = [
-                _os.sys.executable, _TRAIN_SCRIPT,
+                _os.sys.executable, train_script,
                 "--epochs", str(req.epochs),
                 "--batch-size", str(req.batch_size),
                 "--lr", str(req.lr),
@@ -363,6 +459,17 @@ def create_app() -> FastAPI:
                 "--output", str(output_path),
                 "--log-file", str(log_path),
             ]
+            if req.model_type == "tcn":
+                cmd.extend(
+                    [
+                        "--threshold-objective",
+                        str(req.threshold_objective),
+                        "--target-precision",
+                        str(req.target_precision),
+                        "--min-recall",
+                        str(req.min_recall),
+                    ]
+                )
 
             logger.info("Starting training job %s: %s", job_id, cmd)
 
@@ -371,7 +478,7 @@ def create_app() -> FastAPI:
                     cmd,
                     stdout=_subprocess.DEVNULL,
                     stderr=_subprocess.STDOUT,
-                    cwd=str(Path(_TRAIN_SCRIPT).parent),
+                    cwd=str(Path(train_script).parent),
                 )
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"无法启动训练进程: {exc}") from exc
@@ -387,8 +494,10 @@ def create_app() -> FastAPI:
                 "pid": proc.pid,
                 "error": None,
                 "best_val_f1": None,
+                "applied": False,
             }
             _training_jobs[job_id] = job
+            _persist_job(job)
 
             # Background thread to wait for completion
             def _monitor(jid: str, p: _subprocess.Popen) -> None:
@@ -411,6 +520,7 @@ def create_app() -> FastAPI:
                     else:
                         j["status"] = "failed"
                         j["error"] = f"Process exited with code {ret}"
+                    _persist_job(j)
 
             threading.Thread(target=_monitor, args=(job_id, proc), daemon=True).start()
 
@@ -433,9 +543,13 @@ def create_app() -> FastAPI:
     @app.get("/api/train/list")
     def train_list() -> list[dict[str, Any]]:
         with _jobs_lock:
+            def _sort_key(j: dict[str, Any]) -> str:
+                v = j.get("started_at") or j.get("finished_at") or ""
+                return v if isinstance(v, str) else ""
+
             jobs = sorted(
                 _training_jobs.values(),
-                key=lambda j: j.get("started_at", ""),
+                key=_sort_key,
                 reverse=True,
             )
             # Return lightweight summary plus full running job
@@ -490,6 +604,7 @@ def create_app() -> FastAPI:
                     pass
             job["status"] = "stopped"
             job["finished_at"] = datetime.now(timezone.utc).isoformat()
+            _persist_job(job)
             return {"job_id": job_id, "status": "stopped"}
 
     @app.post("/api/train/apply/{job_id}")
@@ -508,32 +623,46 @@ def create_app() -> FastAPI:
             job_dir = Path(job["output_path"]).parent
             src_model = job_dir / f"{Path(job['output_path']).stem}_best.pth"
             src_norm = job_dir / "normalizer" / "csi_zscore_stats.json"
+            model_type = (job.get("params") or {}).get("model_type", "cnn2d")
 
             if not src_model.exists():
                 raise HTTPException(status_code=404, detail=f"Model file not found: {src_model}")
 
             # Copy model to active path
             import shutil as _shutil
-            dst_model = Path(settings.CNN2D_MODEL_PATH)
+            dst_model = Path(settings.CNN2D_MODEL_PATH) if model_type == "cnn2d" else Path(settings.TCN_MODEL_PATH)
             dst_model.parent.mkdir(parents=True, exist_ok=True)
             _shutil.copy2(src_model, dst_model)
             logger.info("Applied model %s → %s", src_model, dst_model)
 
             # Copy normalizer stats if available
+            if not src_norm.exists():
+                fallback_norm_dir = Path(settings.CNN2D_NORMALIZER_DIR) if model_type == "cnn2d" else Path(settings.TCN_NORMALIZER_DIR)
+                fallback_norm = fallback_norm_dir / "csi_zscore_stats.json"
+                if fallback_norm.exists():
+                    src_norm = fallback_norm
             if src_norm.exists():
-                dst_norm_dir = Path(settings.CNN2D_NORMALIZER_DIR)
+                dst_norm_dir = Path(settings.CNN2D_NORMALIZER_DIR) if model_type == "cnn2d" else Path(settings.TCN_NORMALIZER_DIR)
                 dst_norm_dir.mkdir(parents=True, exist_ok=True)
                 _shutil.copy2(src_norm, dst_norm_dir / "csi_zscore_stats.json")
                 logger.info("Applied normalizer %s → %s", src_norm, dst_norm_dir)
 
             # Reload the CNN2D detector
-            global cnn2d_detector
+            global cnn2d_detector, tcn_detector
             try:
-                cnn2d_detector = CNN2DFallDetector()
-                loaded = cnn2d_detector.model_loaded
+                if model_type == "tcn":
+                    tcn_detector = TCNTransformerFallDetector()
+                    loaded = tcn_detector.model_loaded
+                else:
+                    cnn2d_detector = CNN2DFallDetector()
+                    loaded = cnn2d_detector.model_loaded
             except Exception as exc:
                 logger.error("Failed to reload detector after apply: %s", exc)
                 loaded = False
+
+            global detector_mode
+            if loaded:
+                detector_mode = model_type
 
             # Also copy results JSON so /api/model/metrics picks it up
             dst_results = dst_model.parent / "training_results.json"
@@ -543,16 +672,19 @@ def create_app() -> FastAPI:
                 pass
 
             job["applied"] = True
+            _persist_job(job)
             return {
                 "job_id": job_id,
                 "applied": True,
                 "model_loaded": loaded,
                 "model_path": str(dst_model),
+                "model_type": model_type,
+                "active_detector_mode": detector_mode,
                 "best_val_f1": job.get("best_val_f1"),
             }
 
     @app.get("/api/model/metrics")
-    def get_model_metrics() -> dict[str, Any]:
+    def get_model_metrics(model_type: str = Query(default="cnn2d")) -> dict[str, Any]:
         """Return per‑room model evaluation metrics from the last training run.
 
         Sources the ``training_results.json`` written by ``train.py``.
@@ -560,15 +692,20 @@ def create_app() -> FastAPI:
         results file exists.
         """
         import json as _json
-        results_path = settings.CNN2D_MODEL_PATH.replace(
-            "lightweight_2dcnn_best.pth", "training_results.json"
+        model_path = settings.CNN2D_MODEL_PATH if model_type == "cnn2d" else settings.TCN_MODEL_PATH
+        base = Path(model_path).parent
+        candidates = [
+            base / "training_results.json",
+            base / "tcn_training_results.json",
+        ]
+        from app.core.config import BASE_DIR
+        candidates.extend(
+            [
+                BASE_DIR / "data" / "checkpoints" / "training_results.json",
+                BASE_DIR / "data" / "checkpoints" / "tcn_training_results.json",
+            ]
         )
-        if not __import__("os").path.exists(results_path):
-            # Try relative to BASE_DIR
-            from app.core.config import BASE_DIR
-            alt = BASE_DIR / "data" / "checkpoints" / "training_results.json"
-            if alt.exists():
-                results_path = str(alt)
+        results_path = next((str(p) for p in candidates if p.exists()), str(candidates[0]))
         try:
             with open(results_path) as f:
                 return _json.load(f)
@@ -729,8 +866,16 @@ def _next_detection() -> tuple[CsiFrame, DetectionResult, torch.Tensor | None]:
     The window tensor [1, 3, 625, 30] is needed for analytics computation.
     In simple-detector mode this is ``None`` because no window is available.
     In cnn2d mode the raw [1, 625, 90] tensor is returned.
+    In tcn mode the raw [1, 625, 90] tensor is returned.
     """
     source = data_source_manager.get_current_source()
+
+    if detector_mode == "tcn" and hasattr(source, "next_window_2d"):
+        frame, window_2d, _ = source.next_window_2d()
+        result = tcn_detector.predict(window_2d, frame)
+        if tcn_detector._normalizer is not None:
+            window_2d = tcn_detector._normalizer.normalize(window_2d)
+        return frame, result, window_2d
 
     if detector_mode == "cnn2d" and hasattr(source, "next_window_2d"):
         frame, window_2d, _ = source.next_window_2d()
