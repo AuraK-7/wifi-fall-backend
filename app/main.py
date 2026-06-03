@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os as _os
 import signal as _signal
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 import numpy as np
 import scipy.signal
 import torch
@@ -38,6 +39,14 @@ from app.schemas.csi import (
     DetectionResult,
     DetectorModeCommand,
     EnetFallDataSourceCommand,
+)
+from app.schemas.demo import (
+    DemoCsiEnvelope,
+    DemoCsiPacket,
+    DemoPacketAck,
+    MobileFallEventCreate,
+    MobileFallEventResponse,
+    MobileModelConfig,
 )
 from app.services.alert import AlertService
 from app.services.connection_manager import ConnectionManager
@@ -71,6 +80,39 @@ last_alert_time = 0.0
 
 
 ws_manager = ConnectionManager()
+
+
+class MobileCsiConnectionManager:
+    def __init__(self) -> None:
+        self._connections: set[WebSocket] = set()
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self._connections.add(websocket)
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        self._connections.discard(websocket)
+
+    async def broadcast_packet(self, packet: DemoCsiPacket) -> None:
+        message = DemoCsiEnvelope(payload=packet).model_dump(mode="json")
+        stale_connections: list[WebSocket] = []
+        for websocket in list(self._connections):
+            try:
+                await websocket.send_json(message)
+            except Exception:
+                stale_connections.append(websocket)
+
+        for websocket in stale_connections:
+            self.disconnect(websocket)
+
+
+mobile_csi_connections = MobileCsiConnectionManager()
+
+
+class ModelActivateCommand(BaseModel):
+    model_id: str | None = None
+    path: str | None = None
+    detector_type: str | None = None
 
 # ── Training job management  ─────────────────────────────
 _TRAIN_SCRIPT = (Path(__file__).resolve().parents[1] / "train.py").as_posix()
@@ -122,6 +164,84 @@ def create_app() -> FastAPI:
             "runtime": runtime_state.get_summary(),
         }
 
+    @app.websocket("/ws/demo/source")
+    async def receive_demo_source(websocket: WebSocket) -> None:
+        await websocket.accept()
+        logger.info("Demo source WebSocket connected")
+        try:
+            while True:
+                try:
+                    data = await websocket.receive_json()
+                    packet = _parse_demo_source_message(data)
+                    ack = _demo_packet_ack(packet)
+                    await mobile_csi_connections.broadcast_packet(packet)
+                    await websocket.send_json(ack.model_dump(mode="json"))
+                except ValidationError as exc:
+                    await websocket.send_json(
+                        {
+                            "accepted": False,
+                            "queued_at": time.time(),
+                            "message": str(exc),
+                        }
+                    )
+        except WebSocketDisconnect:
+            logger.info("Demo source WebSocket disconnected")
+
+    @app.post("/api/demo/packets", response_model=DemoPacketAck)
+    async def submit_demo_packet(packet: DemoCsiPacket) -> DemoPacketAck:
+        ack = _demo_packet_ack(packet)
+        await mobile_csi_connections.broadcast_packet(packet)
+        return ack
+
+    @app.websocket("/ws/mobile/csi")
+    async def stream_mobile_csi(websocket: WebSocket) -> None:
+        await mobile_csi_connections.connect(websocket)
+        logger.info("Mobile CSI WebSocket connected")
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            logger.info("Mobile CSI WebSocket disconnected")
+        finally:
+            mobile_csi_connections.disconnect(websocket)
+
+    @app.get("/api/mobile/model-config", response_model=MobileModelConfig)
+    def get_mobile_model_config() -> MobileModelConfig:
+        return MobileModelConfig()
+
+    @app.post("/api/mobile/fall-events", response_model=MobileFallEventResponse)
+    def save_mobile_fall_event(
+        event_in: MobileFallEventCreate,
+        db: Session = Depends(get_db),
+    ) -> MobileFallEventResponse:
+        existing = alert_service.get_alert(db, event_in.event_id)
+        if existing is None:
+            alert = models.AlertEvent(
+                event_id=event_in.event_id,
+                timestamp=event_in.timestamp,
+                room=event_in.room,
+                device_id=event_in.device_id,
+                predicted_label=event_in.result.predicted_label,
+                confidence=event_in.result.confidence,
+                risk_level=event_in.result.risk_level,
+                activity_score=event_in.result.activity_score,
+                reason=event_in.result.reason,
+                analytics_snapshot=_mobile_event_snapshot(event_in),
+                frame_id=event_in.packet.frame_id,
+                evidence_chain=_mobile_event_evidence_chain(event_in),
+                handled=False,
+            )
+            db.add(alert)
+            db.commit()
+            db.refresh(alert)
+            logger.info("Mobile fall event saved: %s", alert.event_id)
+
+        return MobileFallEventResponse(
+            event_id=event_in.event_id,
+            saved=True,
+            replay_url=f"#/replay?eventId={event_in.event_id}",
+        )
+
     @app.post("/api/data-source/csv")
     def switch_to_csv_source(command: CsvDataSourceCommand) -> dict[str, Any]:
         try:
@@ -170,6 +290,39 @@ def create_app() -> FastAPI:
             status = enetfall_detector.get_status()
         status["active_detector_mode"] = detector_mode
         return status
+
+    @app.get("/api/models")
+    def list_models() -> dict[str, Any]:
+        return _model_list_payload()
+
+    @app.get("/api/model/list")
+    def list_models_compat() -> dict[str, Any]:
+        return _model_list_payload()
+
+    @app.post("/api/model/activate")
+    def activate_model(command: ModelActivateCommand) -> dict[str, Any]:
+        selected = _find_discovered_model(command)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="Model was not found in configured model paths")
+
+        selected_type = command.detector_type or selected["detector_type"]
+        if selected_type not in {"cnn2d", "enetfall"}:
+            raise HTTPException(
+                status_code=400,
+                detail="detector_type must be cnn2d or enetfall for this model",
+            )
+
+        _activate_model_path(selected["path"], selected_type)
+        return {
+            "message": "Model activated",
+            "model": selected,
+            "active_detector_mode": detector_mode,
+            "status": (
+                cnn2d_detector.get_status()
+                if detector_mode == "cnn2d"
+                else enetfall_detector.get_status()
+            ),
+        }
 
     @app.post("/api/detector/mode")
     def update_detector_mode(command: DetectorModeCommand) -> dict[str, Any]:
@@ -285,7 +438,7 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         """Return analytics windows around an alert event for 3D replay.
 
-        Finds the nearest non_fall→fall transition BEFORE the alert frame,
+        Finds the nearest non_fall to fall transition BEFORE the alert frame,
         then returns a long stretch of walking (before) leading into the fall.
         """
         alert = alert_service.get_alert(db, event_id)
@@ -294,26 +447,22 @@ def create_app() -> FastAPI:
 
         chain = runtime_state.get_evidence_chain(alert.frame_id or 0)
         if chain:
-            # Map evidence entries to frontend format: predicted_label → label
-            windows = []
-            for entry in chain:
-                windows.append({
-                    "window_index": entry.get("window_index", 0),
-                    "room": alert.room,
-                    "analytics": entry.get("analytics"),
-                    "label": entry.get("predicted_label", "unknown"),
-                    "confidence": entry.get("confidence"),
-                })
-            return {
-                "event_id": event_id,
-                "start_window_index": windows[0]["window_index"] if windows else 0,
-                "end_window_index": windows[-1]["window_index"] if windows else 0,
-                "centre_window_index": alert.frame_id or 0,
-                "window_count": len(windows),
-                "windows": windows,
-            }
+            return _replay_payload_from_chain(
+                event_id=event_id,
+                room=alert.room,
+                chain=chain,
+                centre_window_index=alert.frame_id or 0,
+            )
 
-        raise HTTPException(status_code=404, detail="No evidence chain — replay unavailable for this alert")
+        if alert.evidence_chain:
+            return _replay_payload_from_chain(
+                event_id=event_id,
+                room=alert.room,
+                chain=alert.evidence_chain,
+                centre_window_index=_stored_replay_centre(alert.evidence_chain),
+            )
+
+        raise HTTPException(status_code=404, detail="No evidence chain - replay unavailable for this alert")
 
     @app.post("/api/detector/reset")
     def reset_detector() -> dict[str, str]:
@@ -324,9 +473,9 @@ def create_app() -> FastAPI:
         runtime_state = RuntimeState()
         return {"message": "Detector and runtime state reset"}
 
-    # ═══════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------
     # Training Job Management
-    # ═══════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------
 
     class TrainStartRequest(BaseModel):
         epochs: int = Field(default=200, ge=50, le=300)
@@ -346,7 +495,7 @@ def create_app() -> FastAPI:
                 if j["status"] in ("pending", "running"):
                     raise HTTPException(
                         status_code=409,
-                        detail=f"训练任务 {j['job_id'][:8]} 已在运行中，请等待完成或先停止",
+                        detail=f"Training job {j['job_id'][:8]} is already running.",
                     )
 
             job_id = uuid.uuid4().hex[:12]
@@ -379,7 +528,7 @@ def create_app() -> FastAPI:
                     cwd=str(Path(_TRAIN_SCRIPT).parent),
                 )
             except Exception as exc:
-                raise HTTPException(status_code=500, detail=f"无法启动训练进程: {exc}") from exc
+                raise HTTPException(status_code=500, detail=f"Failed to start training process: {exc}") from exc
 
             job = {
                 "job_id": job_id,
@@ -499,7 +648,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/train/apply/{job_id}")
     def train_apply(job_id: str) -> dict[str, Any]:
-        """Apply a completed training job: copy model + normalizer → active paths, reload detector."""
+        """Apply a completed training job: copy model + normalizer to active paths, reload detector."""
         with _jobs_lock:
             job = _training_jobs.get(job_id)
             if job is None:
@@ -522,14 +671,14 @@ def create_app() -> FastAPI:
             dst_model = Path(settings.CNN2D_MODEL_PATH)
             dst_model.parent.mkdir(parents=True, exist_ok=True)
             _shutil.copy2(src_model, dst_model)
-            logger.info("Applied model %s → %s", src_model, dst_model)
+            logger.info("Applied model %s -> %s", src_model, dst_model)
 
             # Copy normalizer stats if available
             if src_norm.exists():
                 dst_norm_dir = Path(settings.CNN2D_NORMALIZER_DIR)
                 dst_norm_dir.mkdir(parents=True, exist_ok=True)
                 _shutil.copy2(src_norm, dst_norm_dir / "csi_zscore_stats.json")
-                logger.info("Applied normalizer %s → %s", src_norm, dst_norm_dir)
+                logger.info("Applied normalizer %s -> %s", src_norm, dst_norm_dir)
 
             # Reload the CNN2D detector
             global cnn2d_detector
@@ -558,7 +707,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/model/metrics")
     def get_model_metrics() -> dict[str, Any]:
-        """Return per‑room model evaluation metrics from the last training run.
+        """Return per-room model evaluation metrics from the last training run.
 
         Sources the ``training_results.json`` written by ``train.py``.
         Falls back to a live evaluation on the current data source if no
@@ -792,6 +941,340 @@ def _next_detection() -> tuple[CsiFrame, DetectionResult, torch.Tensor | None]:
     frame = source.next_frame()
     result = simple_detector.predict(frame)
     return frame, result, None
+
+
+def _model_list_payload() -> dict[str, Any]:
+    status = (
+        cnn2d_detector.get_status()
+        if detector_mode == "cnn2d"
+        else enetfall_detector.get_status()
+    )
+    active_model_path = _normalize_model_path(status.get("model_path"))
+    search_sources = _model_search_sources()
+    extensions = _model_file_extensions()
+    models = _discover_model_files(search_sources, extensions, active_model_path)
+
+    return {
+        "active_detector_mode": detector_mode,
+        "active_model_path": status.get("model_path"),
+        "extensions": sorted(extensions),
+        "search_paths": [
+            {
+                "env_key": env_key,
+                "path": str(path),
+                "exists": path.exists(),
+                "is_dir": path.is_dir(),
+            }
+            for env_key, path in search_sources
+        ],
+        "models": models,
+    }
+
+
+def _model_file_extensions() -> set[str]:
+    raw = settings.MODEL_FILE_EXTENSIONS or ".pt,.pth"
+    extensions = {
+        item.strip().lower()
+        for item in raw.replace(";", ",").split(",")
+        if item.strip()
+    }
+    return {
+        item if item.startswith(".") else f".{item}"
+        for item in extensions
+    }
+
+
+def _find_discovered_model(command: ModelActivateCommand) -> dict[str, Any] | None:
+    payload = _model_list_payload()
+    target_path = _normalize_model_path(command.path)
+    for model in payload["models"]:
+        if command.model_id and model["model_id"] == command.model_id:
+            return model
+        if target_path and _normalize_model_path(model["path"]) == target_path:
+            return model
+    return None
+
+
+def _activate_model_path(model_path: str, detector_type: str) -> None:
+    global detector_mode, cnn2d_detector, enetfall_detector
+    if detector_type == "cnn2d":
+        detector = CNN2DFallDetector(model_path=model_path)
+        if not detector.model_loaded:
+            raise HTTPException(status_code=400, detail=detector.load_error or "CNN2D model failed to load")
+        cnn2d_detector = detector
+        detector_mode = "cnn2d"
+        return
+    if detector_type == "enetfall":
+        detector = ENetFallDetector(model_path=model_path)
+        if not detector.model_loaded:
+            raise HTTPException(status_code=400, detail=detector.load_error or "ENetFall model failed to load")
+        enetfall_detector = detector
+        detector_mode = "enetfall"
+        return
+    raise ValueError(f"Unsupported detector_type: {detector_type}")
+
+
+def _model_search_sources() -> list[tuple[str, Path]]:
+    sources: list[tuple[str, Path]] = []
+    for item in _split_model_search_paths(settings.MODEL_SEARCH_PATHS):
+        sources.append(("MODEL_SEARCH_PATHS", Path(item)))
+
+    configured_paths = {
+        "ENETFALL_MODEL_PATH": settings.ENETFALL_MODEL_PATH,
+        "CNN2D_MODEL_PATH": settings.CNN2D_MODEL_PATH,
+        "ENETFALL_DATA_DIR": settings.ENETFALL_DATA_DIR,
+    }
+    normalizer_parent = Path(settings.CNN2D_NORMALIZER_DIR).parent
+    configured_paths["CNN2D_NORMALIZER_PARENT"] = str(normalizer_parent)
+
+    for env_key, raw_path in configured_paths.items():
+        if raw_path:
+            sources.append((env_key, Path(raw_path)))
+
+    return _dedupe_model_sources(sources)
+
+
+def _split_model_search_paths(raw: str) -> list[str]:
+    if not raw:
+        return []
+    normalized = raw.replace("\n", ";")
+    parts: list[str] = []
+    for chunk in normalized.split(";"):
+        chunk = chunk.strip()
+        if chunk:
+            parts.append(chunk)
+    return parts
+
+
+def _dedupe_model_sources(sources: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    seen: set[str] = set()
+    deduped: list[tuple[str, Path]] = []
+    for env_key, path in sources:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((env_key, path))
+    return deduped
+
+
+def _discover_model_files(
+    sources: list[tuple[str, Path]],
+    extensions: set[str],
+    active_model_path: str | None = None,
+) -> list[dict[str, Any]]:
+    seen_files: set[str] = set()
+    models: list[dict[str, Any]] = []
+    for env_key, source_path in sources:
+        for model_path in _iter_model_files(source_path, extensions):
+            normalized = _normalize_model_path(str(model_path))
+            if normalized is None or normalized in seen_files:
+                continue
+            seen_files.add(normalized)
+            stat = model_path.stat()
+            models.append(
+                {
+                    "model_id": hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12],
+                    "file_name": model_path.name,
+                    "path": str(model_path),
+                    "source_env_key": env_key,
+                    "detector_type": _guess_detector_type(model_path),
+                    "extension": model_path.suffix.lower(),
+                    "size_bytes": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(
+                        stat.st_mtime,
+                        tz=timezone.utc,
+                    ).isoformat(),
+                    "active": normalized == active_model_path,
+                }
+            )
+
+    return sorted(models, key=lambda item: (item["detector_type"], item["file_name"]))
+
+
+def _iter_model_files(source_path: Path, extensions: set[str]) -> list[Path]:
+    try:
+        if source_path.is_file():
+            directory = source_path.parent
+            direct_file = (
+                [source_path]
+                if source_path.suffix.lower() in extensions
+                else []
+            )
+        else:
+            directory = source_path
+            direct_file = []
+
+        if not directory.exists() or not directory.is_dir():
+            return direct_file
+
+        return direct_file + [
+            child
+            for child in directory.iterdir()
+            if child.is_file() and child.suffix.lower() in extensions
+        ]
+    except OSError:
+        return []
+
+
+def _normalize_model_path(raw_path: Any) -> str | None:
+    if not raw_path:
+        return None
+    path = Path(str(raw_path))
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def _guess_detector_type(model_path: Path) -> str:
+    name = model_path.name.lower()
+    parent = str(model_path.parent).lower()
+    if "cnn" in name or "checkpoint" in parent:
+        return "cnn2d"
+    if "b0" in name or "efficientnet" in name or "enetfall" in parent:
+        return "enetfall"
+    return "unknown"
+
+
+def _parse_demo_source_message(data: Any) -> DemoCsiPacket:
+    if isinstance(data, dict) and data.get("type") == "demo_csi_packet" and "payload" in data:
+        return DemoCsiEnvelope.model_validate(data).payload
+    return DemoCsiPacket.model_validate(data)
+
+
+def _demo_packet_ack(packet: DemoCsiPacket) -> DemoPacketAck:
+    return DemoPacketAck(
+        accepted=True,
+        packet_id=packet.packet_id,
+        sequence_id=packet.sequence_id,
+        queued_at=time.time(),
+        message="queued",
+    )
+
+
+def _mobile_event_snapshot(event_in: MobileFallEventCreate) -> dict[str, Any]:
+    return {
+        "source": "mobile_fall_event",
+        "packet_id": event_in.packet_id,
+        "sequence_id": event_in.sequence_id,
+        "model": event_in.model.model_dump(mode="json"),
+        "packet": event_in.packet.model_dump(mode="json"),
+        "result": event_in.result.model_dump(mode="json"),
+        "analytics": event_in.analytics,
+        "avatar": event_in.result.avatar.model_dump(mode="json"),
+    }
+
+
+def _mobile_event_evidence_chain(event_in: MobileFallEventCreate) -> list[dict[str, Any]]:
+    frames = event_in.packet.window
+    if not frames:
+        frames = [
+            {
+                "frame_index": 0,
+                "timestamp": event_in.packet.timestamp,
+                "subcarriers": event_in.packet.subcarriers,
+                "energy": event_in.result.energy,
+                "variance": event_in.result.variance,
+            }
+        ]
+
+    avatar = event_in.result.avatar.model_dump(mode="json")
+    chain: list[dict[str, Any]] = []
+    for fallback_index, frame in enumerate(frames):
+        frame_data = (
+            frame.model_dump(mode="json")
+            if hasattr(frame, "model_dump")
+            else dict(frame)
+        )
+        window_index = int(frame_data.get("frame_index", fallback_index))
+        chain.append(
+            {
+                "window_index": window_index,
+                "room": event_in.room,
+                "timestamp": frame_data.get("timestamp", event_in.timestamp),
+                "analytics": _mobile_window_analytics(event_in, frame_data),
+                "label": event_in.result.predicted_label,
+                "predicted_label": event_in.result.predicted_label,
+                "confidence": event_in.result.confidence,
+                "avatar": avatar,
+            }
+        )
+    return chain
+
+
+def _mobile_window_analytics(
+    event_in: MobileFallEventCreate,
+    frame_data: dict[str, Any],
+) -> dict[str, Any]:
+    analytics = dict(event_in.analytics or {})
+    subcarriers = frame_data.get("subcarriers") or event_in.packet.subcarriers
+    energy = frame_data.get("energy")
+    variance = frame_data.get("variance")
+
+    analytics["subcarrier_amplitudes"] = subcarriers
+    analytics["energy"] = energy if energy is not None else event_in.result.energy or analytics.get("energy", 0.0)
+    analytics["signal_variance"] = (
+        variance
+        if variance is not None
+        else event_in.result.variance or analytics.get("signal_variance", 0.0)
+    )
+    analytics.setdefault("micro_doppler_spectrum", [])
+    analytics.setdefault("antenna_correlation", 0.0)
+    analytics.setdefault("dominant_freq", 0.0)
+    analytics.setdefault("frequency_spread", 0.0)
+    return analytics
+
+
+def _replay_payload_from_chain(
+    event_id: str,
+    room: str,
+    chain: list[dict[str, Any]],
+    centre_window_index: int,
+) -> dict[str, Any]:
+    windows: list[dict[str, Any]] = []
+    for entry in chain:
+        label = entry.get("label") or entry.get("predicted_label", "unknown")
+        windows.append(
+            {
+                "window_index": entry.get("window_index", 0),
+                "room": entry.get("room", room),
+                "analytics": entry.get("analytics"),
+                "label": label,
+                "confidence": entry.get("confidence"),
+                "avatar": entry.get("avatar") or _avatar_from_replay_entry(entry),
+            }
+        )
+
+    return {
+        "event_id": event_id,
+        "start_window_index": windows[0]["window_index"] if windows else 0,
+        "end_window_index": windows[-1]["window_index"] if windows else 0,
+        "centre_window_index": centre_window_index,
+        "window_count": len(windows),
+        "windows": windows,
+    }
+
+
+def _stored_replay_centre(chain: list[dict[str, Any]]) -> int:
+    if not chain:
+        return 0
+    centre_offset = min(40, len(chain) - 1)
+    return int(chain[centre_offset].get("window_index", centre_offset))
+
+
+def _avatar_from_replay_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    predicted_label = entry.get("predicted_label") or entry.get("label", "unknown")
+    predicted_state = _label_to_avatar_state(predicted_label)
+    return {
+        "display_state": predicted_state,
+        "predicted_state": predicted_state,
+        "source": "model_prediction",
+        "predicted_label": predicted_label,
+        "confidence": entry.get("confidence"),
+        "risk_level": "high" if predicted_label == "fall" else "low",
+        "alert": predicted_label == "fall",
+    }
 
 
 def _avatar_payload(frame: CsiFrame, result: DetectionResult) -> dict[str, Any]:
