@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     CNN2D_NORMALIZER_DIR: str = str(
         BASE_DIR / "data" / "checkpoints" / "normalizer"
     )
+    TCN_MODEL_PATH: str = str(
+        BASE_DIR / "data" / "checkpoints" / "tcn_transformer_best.pth"
+    )
+    TCN_NORMALIZER_DIR: str = str(
+        BASE_DIR / "data" / "checkpoints" / "tcn_normalizer"
+    )
     MODEL_SEARCH_PATHS: str = ""
     MODEL_FILE_EXTENSIONS: str = ".pt,.pth"
 

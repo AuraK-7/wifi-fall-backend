@@ -75,7 +75,7 @@ class EnetFallDataSourceCommand(BaseModel):
 
 
 class DetectorModeCommand(BaseModel):
-    mode: Literal["simple", "enetfall", "cnn2d"]
+    mode: Literal["simple", "enetfall", "cnn2d", "tcn"]
 
 
 class RecentResultItem(BaseModel):
